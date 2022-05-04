@@ -1,7 +1,7 @@
 'reach 0.1';
 
 export const main = Reach.App(() => {
-    const Deployer = Participant('Deployer', {
+    const Deployer = Participant('Admin', {
         signedMoney: UInt,
         deadline: UInt,
         deployReady: Fun([], Null),
@@ -20,6 +20,7 @@ export const main = Reach.App(() => {
         //1 -> no 
         //2 -> abstain
         vote: Fun([Address], Bool),
+        timesUp: Fun([], Bool),
     });
 
     init()
@@ -70,7 +71,14 @@ export const main = Reach.App(() => {
                 k(true);
                 return checkVoted(this, who)();
         }) 
+        .timeout( deadlineBlock, () => {
+            const [ [], k ] = call(Voter.timesUp);
+            k(true);
+            return [ false, howMany ]
+        });
 
+    const leftovers = howMany;
+    transfer(leftovers * signedMoney).to(Deployer);
 
     commit();
     exit();
