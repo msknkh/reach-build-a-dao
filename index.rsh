@@ -1,86 +1,73 @@
 'reach 0.1';
+'use strict';
 
-export const main = Reach.App(() => {
-    const Deployer = Participant('Admin', {
-        signedMoney: UInt,
-        deadline: UInt,
-        deployReady: Fun([], Null),
-    });
+const [ _, PROPOSAL_1, PROPOSAL_2, TIMEOUT ] = makeEnum(3);
 
-    //Proposer Address, description 
-    //UInt
-    const Proposer = API('Proposer', {
-        propose: Fun([Address], Bool),
-    });
+const Common = {
+  showOutcome: Fun([UInt, UInt, UInt], Null),
+};
 
-    //proposalId, vote, reason, Address
-    //UInt, UInt, 
-    const Voter = API('Voter', {
-        //0 -> yes
-        //1 -> no 
-        //2 -> abstain
-        vote: Fun([Address], Bool),
-        timesUp: Fun([], Bool),
-    });
+export const main =
+  Reach.App(() => {
 
-    init()
+    setOptions({ connectors: [ETH, ALGO ]});
 
-    Deployer.only(() => {
-        const signedMoney = declassify(interact.signedMoney);
-        const deadline = declassify(interact.deadline);
-    })
-    Deployer.publish(signedMoney, deadline);
+    const Pollster =
+      Participant('Pollster', { ...Common,
+        getParams: Fun([], Object({
+          ticketPrice: UInt,
+          deadline: UInt,
+          prop1Addr: Address,
+          prop2Addr: Address }))
+      });
+
+    const Voter =
+      ParticipantClass('Voter',
+      { ...Common,
+        getVote: Fun([], Bool),
+        voterWas: Fun([Address], Null),
+        shouldVote: Fun([], Bool),
+      });
+
+    init();
+
+    const showOutcome = (which, forA, forB) => () => {
+      each([Pollster, Voter], () =>
+        interact.showOutcome(which, forA, forB)); };
+
+    Pollster.publish();
     commit();
-    Deployer.publish();
-    Deployer.interact.deployReady();
+    Pollster.only(() => {
+      const { ticketPrice, deadline, prop1Addr, prop2Addr } =
+        declassify(interact.getParams());
+    });
+    Pollster.publish(ticketPrice, deadline, prop1Addr, prop2Addr);
 
-    const deadlineBlock = relativeTime(deadline);
-    //const proposals = new Set();
-    const Votes = new Set(); 
+    const [ timeRemaining, keepGoing ] = makeDeadline(deadline);
 
+    const [ forA, forB ] =
+      parallelReduce([ 0, 0])
+      .invariant(balance() == (forA + forB) * ticketPrice)
+      .while( keepGoing() )
+      .case(Voter, () => ({
+          msg: declassify(interact.getVote()),
+          when: declassify(interact.shouldVote()),
+        }),
+        (_) => ticketPrice,
+        (forProposal1) => {
+          const voter = this;
+          Voter.only(() => interact.voterWas(voter));
+          const [ nA, nB ] = forProposal1 ? [ 1, 0 ] : [ 0, 1 ];
+          return [ forA + nA, forB + nB ]; })
+      .timeout(timeRemaining(), () => {
+        Anybody.publish();
+        showOutcome(TIMEOUT, forA, forB)();
+        return [ forA, forB ]; });
 
-    const [ keepGoing, howMany ] = 
-        parallelReduce([true, 0])
-        .define(() => {
-            const checkVoted = (actor, who) => {
-                check( actor == Deployer, "you are the boss");
-                check( ! Votes.member(who), "not yet" );
-                return () => {
-                  Votes.insert(who);
-                  return [ keepGoing, howMany + 1 ];
-                };
-            };
-        })
-        .invariant(
-            balance() == howMany * signedMoney
-            && Votes.Map.size() == howMany
-        )
-        .while( keepGoing )
-        .api(Proposer.propose,
-            (who) => {},
-            (_) => 0,
-            (who, k) => {
-                k(true);
-                return [true, howMany];
-            }
-        ) 
-        .api(Voter.vote,
-            (who) => {const _ = checkVoted(this, who); },
-            (_) => signedMoney,
-            (who, k) => {
-                k(true);
-                return checkVoted(this, who)();
-        }) 
-        .timeout( deadlineBlock, () => {
-            const [ [], k ] = call(Voter.timesUp);
-            k(true);
-            return [ false, howMany ]
-        });
-
-    const leftovers = howMany;
-    transfer(leftovers * signedMoney).to(Deployer);
-
+    const outcome = forA >= forB ? PROPOSAL_1 : PROPOSAL_2;
+    const winner = outcome == PROPOSAL_1 ? prop1Addr : prop2Addr;
+    transfer(balance()).to(winner);
     commit();
-    exit();
+    showOutcome(outcome, forA, forB)();
 
-});
+  });
